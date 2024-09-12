@@ -21,7 +21,7 @@ module baud_rate_prescaler (
             brp <= sys_clk_freq/(baud_rate*n_tq);
 
             //time quant base on the brp
-            tq<= brp;
+            tq<= brp/sys_clk_freq;
         
         end
     end
