@@ -2,9 +2,12 @@ module can_frame_transmitter (
     input wire clk,
     input wire rst,
     input wire [10:0] message_id,   // Message ID for arbitration
+    input wire RTR,                  //RTR bit for the indication of the data bit or the remote bit
+    input wire IDE_BIT              //indication for the standard or the extetnded CAN
     input wire [7:0] data,          // Data to be transmitted
     input wire [3:0] dlc,           // Data Length Code (DLC)
     input wire rx_bus,              // Bus value to check during arbitration
+    input wire [2:0]bus_idle,       //indication of the bus is idle (includes the 3 bit recessive bits)
     output reg tx_bus,              // Transmit to CAN bus
     output reg ack_received,        // Acknowledgment received
     output reg arbitration_lost,    // Indicates if arbitration is lost
@@ -12,12 +15,16 @@ module can_frame_transmitter (
 );
 
     // State encoding for frame transmission
-    parameter IDLE = 3'b000, 
-              ARBITRATION = 3'b001, 
-              FRAME_TRANSMISSION = 3'b010, 
-              CRC_TRANSMISSION = 3'b011, 
-              ACK_WAIT = 3'b100, 
-              ERROR_CHECK = 3'b101;
+    parameter IDLE = 3'b000, // 0
+              SOF_TRANSMISSION   = 4'b0001, 
+              ARBITRATION        = 4'b0010, 
+              CONTROL_FIELD_TX   = 4'b0011, 
+              DATA_FIELD         = 4'b0100, 
+              CRC_TRANSMISSION   = 4'b0101, //includes CRC_FIELD and CRC_delimeter
+              ACK_FIELD          = 4'b0110,//includes the ACK_SLOT and ACK_DELIMETER
+              EOF_TRANSMISSION   = 4'b0111, 
+              IFS_TRANSMISSION   = 4'b1000, 
+              ERROR_CHECK        = 4'b1001
 
     reg [2:0] state, next_state;    // State register
     reg [4:0] bit_counter;          // Bit counter for the arbitration and frame transmission
@@ -51,35 +58,110 @@ module can_frame_transmitter (
         end else begin
             case (state)
                 IDLE: begin
+                    arbitration_won <='b0;
                     arbitration_lost <= 1'b0;
                     ack_received <= 1'b0;
                     error_flag <= 1'b0;
-                    if (/* some condition to start arbitration */) begin
-                        state <= ARBITRATION;
+                    if (bus_idle === 111) begin
+                        state <= SOF_TRANSMISSION;
                         bit_counter <= 0;
                     end
                 end
 
+                SOF_TRANSMISSION:begin
+                    if(bit_counter <= 0)begin
+                        tx_bus <= 'b0;
+                       
+                        state <= ARBITRATION; 
+                    end else begin
+                        state <= IDLE;
+                    end
+                    bit_counter <= bit_counter + 1;
+                end
+
                 ARBITRATION: begin
-                    if (bit_counter < 11) begin
+                    if (bit_counter < 12 && bit_counter > 0) begin
                         // Transmit each bit of message ID
-                        tx_bus <= message_id[10 - bit_counter]; 
+                        tx_bus <= message_id[11 - bit_counter]; 
 
                         // Check the bus to see if we lost arbitration
-                        if (message_id[10 - bit_counter] == 1'b1 && rx_bus == 1'b0) begin
+                        if (message_id[11 - bit_counter] == 1'b1 && rx_bus == 1'b0) begin
                             // Lost arbitration: we transmitted a recessive bit (1)
                             // but the bus reads a dominant bit (0)
                             arbitration_lost <= 1'b1;
+                            arbitration_won <= 'b0;
                             state <= IDLE;  // Return to IDLE after losing arbitration
-                        end else if (bit_counter == 10) begin
+                        end else if (bit_counter == 11) begin
                             // Won arbitration if no mismatch detected
                             arbitration_won <= 1'b1;
-                            state <= FRAME_TRANSMISSION;
+                            arbitration_lost <='b0;
+                            if(IDE_BIT == 'b0)begin
+                                bit_counter = bit_counter + 1;
+                                state <= CONTROL_FIELD_TX;
+                            end
                         end
                         bit_counter <= bit_counter + 1;
+                    end       
+            end
+
+
+
+//begin of the control field
+                CONTROL_FIELD_TX: begin
+                    if (bit_counter == 12) begin
+                        tx_bus <= RTR;
+                        bit_counter = bit_counter + 1;
+                        state <= CONTROL_FIELD_TX;
                     end
+                    if(bit_counter == 13) begin
+                        tx_bus <= IDE_BIT;
+                        bit_counter = bit_counter +1;
+                        state <=CONTROL_FIELD_TX;
+                    end
+                    if(bit_counter == 14)begin
+                        tx_bus <= reserve;    //reserve have to be defined by used or default 
+                        bit_counter = bit_counter +1;
+                        state <= CONTROL_FIELD_TX;
+                    end
+                    if(arbitration_won && bit_counter >= 15 && bit_counter <= 20)begin
+                        tx_bus <=dlc[20 - bit_counter-1];
+                        bit_counter = bit_counter + 1;
+                        state = CONTROL_FIELD_TX;
+                    end   
                 end
 
+
+//DATA field starts here
+
+                DATA_FIELD: begin
+
+
+                end
+
+
+
+//CRC field starts here
+
+
+
+
+
+
+//ACK field starts here
+
+
+
+
+
+
+//EOF field starts here
+
+
+
+
+
+
+//IFS field starts here
                 FRAME_TRANSMISSION: begin
                     if (arbitration_won) begin
                      // Transmit the DLC (Data Length Code) after arbitration, starting after the 11-bit message ID
@@ -91,7 +173,7 @@ module can_frame_transmitter (
                     end else if (bit_counter >= (15 + dlc * 8)) begin
                     // Once data is transmitted, move to CRC transmission
                     state <= CRC_TRANSMISSION;
-        end
+                    end
 
         // Keep incrementing the bit counter for continuous frame transmission
         bit_counter <= bit_counter + 1;
