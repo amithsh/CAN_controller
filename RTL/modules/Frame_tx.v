@@ -4,7 +4,7 @@ module can_frame_transmitter (
     input wire [10:0] message_id,   // Message ID for arbitration
     input wire RTR,                  //RTR bit for the indication of the data bit or the remote bit
     input wire IDE_BIT              //indication for the standard or the extetnded CAN
-    input wire [7:0] data,          // Data to be transmitted
+    input wire [8*8-1:0] data,          // Data to be transmitted
     input wire [3:0] dlc,           // Data Length Code (DLC)
     input wire rx_bus,              // Bus value to check during arbitration
     input wire [2:0]bus_idle,       //indication of the bus is idle (includes the 3 bit recessive bits)
@@ -123,7 +123,7 @@ module can_frame_transmitter (
                         bit_counter = bit_counter +1;
                         state <= CONTROL_FIELD_TX;
                     end
-                    if(arbitration_won && bit_counter >= 15 && bit_counter <= 20)begin
+                    if(arbitration_won && bit_counter >= 15 && bit_counter < 20)begin
                         tx_bus <=dlc[20 - bit_counter-1];
                         bit_counter = bit_counter + 1;
                         state = CONTROL_FIELD_TX;
@@ -134,15 +134,29 @@ module can_frame_transmitter (
 //DATA field starts here
 
                 DATA_FIELD: begin
-
-
+                    if(bit_counter >=20 && bit_counter < (20+dlc*8))begin
+                        tx_bus <= data[(dlc*8-1) - bit_counter-20 ];
+                        bit_counter = bit_counter + 1;
+                        state = DATA_FIELD;
+                    end else if(bit_counter == (20+dlc*8)) begin
+                        bit_counter = bit_counter +1;
+                        state = CRC_TRANSMISSION;
+                        $display("error transmitting the data bits");
+                    end else if( bit_counter > (20+dlc*8)) begin
+                        $display("error transmitting the data field -------> error in the data field");
+                        state = IDLE;
+                    end
                 end
 
 
 
 //CRC field starts here
 
+                CRC_TRANSMISSION:begin
 
+                    
+
+                end
 
 
 
