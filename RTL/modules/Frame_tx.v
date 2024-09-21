@@ -35,6 +35,19 @@ module can_frame_transmitter (
     reg [3:0] retransmission_count; // Counter for retransmission attempts
     parameter MAX_RETRANSMISSIONS = 4; // Maximum number of retransmissions
 
+    reg crc_start;
+    wire [15:0] crc_output;
+    wire crc_done;
+    
+    lpset6 crc_module (
+        .clock(clk),
+        .start(crc_start),
+        .data(tx_bus),  // Assuming tx_bus is the input data stream
+        .done(crc_done),
+        .r(crc_output)
+    );
+
+
     // CRC Calculation (Assumed to be pre-calculated for simplicity)
     always @(posedge clk or posedge rst) begin
         if (rst) begin
@@ -63,8 +76,8 @@ module can_frame_transmitter (
                     ack_received <= 1'b0;
                     error_flag <= 1'b0;
                     if (bus_idle === 111) begin
-                        state <= SOF_TRANSMISSION;
                         bit_counter <= 0;
+                        state <= SOF_TRANSMISSION;
                     end
                 end
 
@@ -140,6 +153,7 @@ module can_frame_transmitter (
                         state = DATA_FIELD;
                     end else if(bit_counter == (20+dlc*8)) begin
                         bit_counter = bit_counter +1;
+                         crc_start <= 1;
                         state = CRC_TRANSMISSION;
                         $display("error transmitting the data bits");
                     end else if( bit_counter > (20+dlc*8)) begin
@@ -153,22 +167,62 @@ module can_frame_transmitter (
 //CRC field starts here
 
                 CRC_TRANSMISSION:begin
-                    
-                    
-
+                    if(bit_counter >= 20+(dlc*8) && bit_counter < (20+16+(dlc*8)))begin
+                        tx_bus = crc_output[(20+16+(dlc*8)-1)-bit_counter];
+                        bit_counter = bit_counter + 1;
+                        state = CRC_TRANSMISSION;
+                    end else if(bit_counter == (20+16+(dlc*8))) begin
+                        tx_bus = 'b1;
+                        state = ACK_FIELD;
+                    end else begin
+                        $display("error transmitting the crc bits");
+                        state = IDLE;
+                    end
                 end
-
 
 
 
 //ACK field starts here
 
+                ACK_FIELD: begin
+                    if(bit_counter == (20+16+(dlc*8)+1)) begin
+                        tx_bus <= 'b1;
+                        bit_counter = bit_counter +1;
+                        state = ACK_FIELD;
+                    end else if(bit_counter == (20+16+(dlc*8)+2)) begin
+                        if(rx_bus == 'b0 )begin
+                            $display("acknowledgment received");
+                            ack_received <= 'b1;
+                            bit_counter = bit_counter +1;
+                            state = EOF_TRANSMISSION;
+                        end else begin
+                            $display("acknowledgment not received");
+                            ack_received <= 'b0;
+                            state = IDLE
+                        end
+                    end else begin
+                        $display("error in the bit_counter ft- ack field");
+                        state = IDLE;
+                    end
 
 
-
+                end
+                
 
 
 //EOF field starts here
+
+                EOF_TRANSMISSION: begin
+                    if(bit_counter == (20+16+(dlc*8)+3)) begin
+                        tx_bus = 'b1;
+                        bit_counter = bit_counter+1;
+                        state = IFS_TRANSMISSION;
+                    end else begin
+                        state = IDLE;
+
+                    end
+
+                end
 
 
 
@@ -176,90 +230,101 @@ module can_frame_transmitter (
 
 
 //IFS field starts here
-                FRAME_TRANSMISSION: begin
-                    if (arbitration_won) begin
-                     // Transmit the DLC (Data Length Code) after arbitration, starting after the 11-bit message ID
-                    if (bit_counter >= 11 && bit_counter < 15) begin
-                    tx_bus <= dlc[14 - bit_counter];  // DLC is 4 bits
-                    end else if (bit_counter >= 15 && bit_counter < (15 + dlc * 8)) begin
-                    // Transmit data bits based on the DLC (number of bytes in the frame)
-                    tx_bus <= data[(dlc * 8 - 1) - (bit_counter - 15)];
-                    end else if (bit_counter >= (15 + dlc * 8)) begin
-                    // Once data is transmitted, move to CRC transmission
-                    state <= CRC_TRANSMISSION;
+                IFS_TRANSMISSION: begin
+                    if(bit_counter == (20+16+(dlc*8)+4) ) begin
+                        
                     end
-
-        // Keep incrementing the bit counter for continuous frame transmission
-        bit_counter <= bit_counter + 1;
-    end
-end
-
-                CRC_TRANSMISSION: begin
-    // Assuming the CRC is 15 bits long and starts transmitting after the data frame
-    if (bit_counter >= (15 + dlc * 8) && bit_counter < (15 + dlc * 8 + 15)) begin
-        tx_bus <= crc[(15 + dlc * 8 + 15 - 1) - bit_counter];  // Transmit CRC bit by bit
-    end else if (bit_counter == (15 + dlc * 8 + 15)) begin
-        state <= ACK_WAIT;  // Transition to acknowledgment wait state after CRC transmission
-    end
-
-    // Continue incrementing bit_counter through CRC transmission
-    bit_counter <= bit_counter + 1;
-end
-
-                ACK_WAIT: begin
-
-                     bit_counter <= bit_counter + 1;
-
-                    if (bit_counter < 32) begin
-                    // Assume we're checking for a fixed duration; adjust as needed
-                     if (rx_bus == 1'b0) begin  // ACK received (dominant bit)
-                     ack_received <= 1'b1;
-                     ack_check <= 1'b1;  // Indicate that we are checking for acknowledgment
-                end else begin
-                     ack_received <= 1'b0;
-                     ack_check <= 1'b0;  // No acknowledgment received
-                end
                 end
 
-                    if (bit_counter >= 32) begin
-                    // Move to the ERROR_CHECK state if acknowledgment is not received or other issues are detected
-                    if (ack_check == 1'b0) begin
-                    // No acknowledgment received, flag as error
-                    crc_valid <= 1'b1;
-                    end
-                    state <= ERROR_CHECK;
-                end
-                end
 
-                ERROR_CHECK: begin
-                    // Handle CRC errors, etc.
-                    if (crc_valid == 1'b0) begin  // Assume CRC error
-                        error_flag <= 1'b1;
-                    end
-                    ERROR_CHECK: begin
-                    // Handle CRC errors, etc.
-                    if (error_flag == 1'b1) begin
-                        // Retry transmission if errors are detected
-                        if (retransmission_count < MAX_RETRANSMISSIONS) begin
-                            retransmission_count <= retransmission_count + 1;
-                            state <= ARBITRATION;  // Re-attempt arbitration
-                        end else begin
-                            // Max retransmissions reached, return to IDLE
-                            state <= IDLE;
-                        end
-                    end else begin
-                        // If no error flag set, just go back to IDLE
-                        state <= IDLE;
-                    end
-                    // Reset bit_counter for the next transmission attempt
-                    bit_counter <= 0;
-                end
-                    state <= IDLE;
-                end
 
-                default: state <= IDLE;
-            endcase
-        end
-    end
 
-endmodule
+
+//
+//                 FRAME_TRANSMISSION: begin
+//                     if (arbitration_won) begin
+//                      // Transmit the DLC (Data Length Code) after arbitration, starting after the 11-bit message ID
+//                     if (bit_counter >= 11 && bit_counter < 15) begin
+//                     tx_bus <= dlc[14 - bit_counter];  // DLC is 4 bits
+//                     end else if (bit_counter >= 15 && bit_counter < (15 + dlc * 8)) begin
+//                     // Transmit data bits based on the DLC (number of bytes in the frame)
+//                     tx_bus <= data[(dlc * 8 - 1) - (bit_counter - 15)];
+//                     end else if (bit_counter >= (15 + dlc * 8)) begin
+//                     // Once data is transmitted, move to CRC transmission
+//                     state <= CRC_TRANSMISSION;
+//                     end
+
+//         // Keep incrementing the bit counter for continuous frame transmission
+//         bit_counter <= bit_counter + 1;
+//     end
+// end
+
+//                 CRC_TRANSMISSION: begin
+//     // Assuming the CRC is 15 bits long and starts transmitting after the data frame
+//     if (bit_counter >= (15 + dlc * 8) && bit_counter < (15 + dlc * 8 + 15)) begin
+//         tx_bus <= crc[(15 + dlc * 8 + 15 - 1) - bit_counter];  // Transmit CRC bit by bit
+//     end else if (bit_counter == (15 + dlc * 8 + 15)) begin
+//         state <= ACK_WAIT;  // Transition to acknowledgment wait state after CRC transmission
+//     end
+
+//     // Continue incrementing bit_counter through CRC transmission
+//     bit_counter <= bit_counter + 1;
+// end
+
+//                 ACK_WAIT: begin
+
+//                      bit_counter <= bit_counter + 1;
+
+//                     if (bit_counter < 32) begin
+//                     // Assume we're checking for a fixed duration; adjust as needed
+//                      if (rx_bus == 1'b0) begin  // ACK received (dominant bit)
+//                      ack_received <= 1'b1;
+//                      ack_check <= 1'b1;  // Indicate that we are checking for acknowledgment
+//                 end else begin
+//                      ack_received <= 1'b0;
+//                      ack_check <= 1'b0;  // No acknowledgment received
+//                 end
+//                 end
+
+//                     if (bit_counter >= 32) begin
+//                     // Move to the ERROR_CHECK state if acknowledgment is not received or other issues are detected
+//                     if (ack_check == 1'b0) begin
+//                     // No acknowledgment received, flag as error
+//                     crc_valid <= 1'b1;
+//                     end
+//                     state <= ERROR_CHECK;
+//                 end
+//                 end
+
+//                 ERROR_CHECK: begin
+//                     // Handle CRC errors, etc.
+//                     if (crc_valid == 1'b0) begin  // Assume CRC error
+//                         error_flag <= 1'b1;
+//                     end
+//                     ERROR_CHECK: begin
+//                     // Handle CRC errors, etc.
+//                     if (error_flag == 1'b1) begin
+//                         // Retry transmission if errors are detected
+//                         if (retransmission_count < MAX_RETRANSMISSIONS) begin
+//                             retransmission_count <= retransmission_count + 1;
+//                             state <= ARBITRATION;  // Re-attempt arbitration
+//                         end else begin
+//                             // Max retransmissions reached, return to IDLE
+//                             state <= IDLE;
+//                         end
+//                     end else begin
+//                         // If no error flag set, just go back to IDLE
+//                         state <= IDLE;
+//                     end
+//                     // Reset bit_counter for the next transmission attempt
+//                     bit_counter <= 0;
+//                 end
+//                     state <= IDLE;
+//                 end
+
+//                 default: state <= IDLE;
+//             endcase
+//         end
+//     end
+
+// endmodule
